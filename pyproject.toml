@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "google-scholar-api"
+version = "0.1.0"
+description = "A comprehensive and robust Google Scholar Scraper API"
+authors = [
+  { name="Sung Oh", email="sunggyeol@gmail.com" },
+]
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "requests",
+    "beautifulsoup4",
+    "selenium",
+    "webdriver-manager",
+    "fake-useragent",
+    "pydantic>=2.0",
+    "loguru"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/sunggyeol/google-scholar-api"
