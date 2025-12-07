@@ -8,19 +8,16 @@ class ScraperBackend(ABC):
         pass
 
 class GoogleScholar:
-    def __init__(self, backend: str = 'requests'):
+    def __init__(self, backend: str = 'selenium'):
         self.backend_name = backend
         self._backend = self._load_backend(backend)
 
     def _load_backend(self, backend_name: str) -> ScraperBackend:
-        if backend_name == 'requests':
-            from .backends.requests_backend import RequestsBackend
-            return RequestsBackend()
-        elif backend_name == 'selenium':
+        if backend_name == 'selenium':
             from .backends.selenium_backend import SeleniumBackend
             return SeleniumBackend()
         else:
-            raise ValueError(f"Unknown backend: {backend_name}. Supported: 'requests', 'selenium'")
+            raise ValueError(f"Unknown backend: {backend_name}. Only 'selenium' is supported.")
 
     def search(self, 
                engine: str = "google_scholar", 

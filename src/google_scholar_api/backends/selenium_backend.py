@@ -21,11 +21,34 @@ from ..utils import random_sleep, random_sleep_long
 class SeleniumBackend(ScraperBackend):
     BASE_URL = "https://scholar.google.com"
 
-    def __init__(self):
+    def __init__(self, headless: bool = True):
         chrome_options = Options()
+        
+        # Basic stability options
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--no-sandbox")
-        # chrome_options.add_argument("--headless") 
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        
+        # Memory and stability improvements for ARM64/low-memory systems
+        chrome_options.add_argument("--disable-software-rasterizer")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-setuid-sandbox")
+        chrome_options.add_argument("--single-process")  # Prevent tab crashes
+        chrome_options.add_argument("--disable-web-security")
+        chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+        
+        # Memory limits
+        chrome_options.add_argument("--js-flags=--max-old-space-size=512")
+        chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+        chrome_options.add_argument("--disable-renderer-backgrounding")
+        
+        # Headless mode (recommended for servers/ARM systems)
+        if headless:
+            chrome_options.add_argument("--headless=new")
+        
+        # Additional options for better compatibility
+        chrome_options.add_argument("--window-size=1280,720")
+        chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         
         service = None
         
@@ -40,9 +63,28 @@ class SeleniumBackend(ScraperBackend):
                 "/usr/lib/chromium-browser/chromedriver",
                 "/usr/local/bin/chromedriver"
             ]
+            
+            # For snap-installed chromium, try to find the snap chromedriver
+            snap_driver = "/snap/bin/chromium.chromedriver"
+            if os.path.exists(snap_driver):
+                system_driver_paths.insert(0, snap_driver)
+            
+            # Find and set the Chrome/Chromium binary location for ARM64
+            chromium_paths = [
+                "/usr/bin/chromium-browser",
+                "/usr/bin/chromium",
+                "/snap/bin/chromium"
+            ]
+            
+            for browser_path in chromium_paths:
+                if os.path.exists(browser_path):
+                    chrome_options.binary_location = browser_path
+                    print(f"Using Chromium binary: {browser_path}")
+                    break
+            
             for path in system_driver_paths:
                 if os.path.exists(path):
-                    print(f"Detected ARM64 system. Using system chromedriver at: {path}")
+                    print(f"Using ChromeDriver: {path}")
                     service = Service(path)
                     break
             
