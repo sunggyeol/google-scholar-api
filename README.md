@@ -1,36 +1,57 @@
-# Google Scholar API
+# Google Scholar Library & API
 
-A Python library for extracting data from Google Scholar using Selenium.
+Google Scholar scraping with Python library and REST API with Redis caching.
+
+## What's Included
+
+- **Python Library** (`google_scholar_lib`) - Direct Python interface
+- **REST API** (`src/api`) - FastAPI server with Redis caching
 
 ## Features
 
-- **Publication Search** - Find papers by keywords
-- **Author Profiles** - Get author details by ID or name
-- **Citation Data** - Export citations in multiple formats (BibTeX, etc.)
-- **Robust Search** - Automatic fallback strategies for blocked queries
-- **ARM64 Support** - Works on Jetson, Raspberry Pi, and other ARM systems
+- Publication search, author profiles, citations (BibTeX, etc.)
+- Automatic fallback for rate limiting
+- Redis caching with configurable TTL
+- Interactive API documentation at `/docs`
+- Docker deployment support
+- ARM64 compatible (Jetson, Raspberry Pi)
 
 ## Requirements
 
 - Python 3.8+
 - Chrome or Chromium browser
 - ChromeDriver
+- Redis (for API caching - optional for library use)
 
 ## Installation
+
+### Library Only
 
 ```bash
 pip install .
 ```
 
-**For ARM64 systems (Jetson, Raspberry Pi):**
+### Library + API
+
 ```bash
-sudo apt install chromium-browser chromium-chromedriver
+pip install -r requirements.txt
+# or
+pip install -e .
 ```
 
-## Quick Start
+**For ARM64 systems (Jetson, Raspberry Pi):**
+```bash
+sudo apt install chromium-browser chromium-chromedriver redis-server
+```
+
+---
+
+## 🐍 Python Library Usage
+
+### Quick Start
 
 ```python
-from google_scholar_api import GoogleScholar
+from google_scholar_lib import GoogleScholar
 
 # Initialize
 api = GoogleScholar()
@@ -41,12 +62,12 @@ for paper in results.organic_results:
     print(f"{paper.title} - {paper.link}")
 ```
 
-## Usage Examples
+### Usage Examples
 
 ### 1. Search Publications
 
 ```python
-from google_scholar_api import GoogleScholar
+from google_scholar_lib import GoogleScholar
 
 api = GoogleScholar()
 results = api.search_scholar("Machine Learning", num=10)
@@ -111,6 +132,55 @@ for citation in results.citations:
     print(f"{citation['snippet']}\n")
 ```
 
+---
+
+## REST API Usage
+
+### Quick Start
+
+```bash
+# 1. Start Redis (if not already running)
+sudo systemctl start redis-server
+
+# 2. Start API with Docker
+docker compose up -d
+
+# 3. View logs
+docker compose logs -f
+
+# 4. Stop
+docker compose down
+```
+
+Access the API at `http://localhost:8765/docs`
+
+### Example Requests
+
+```bash
+# Search publications
+curl -X POST http://localhost:8765/api/v1/search/scholar \
+  -H "Content-Type: application/json" \
+  -d '{"q": "machine learning", "num": 10}'
+
+# Get author profile
+curl http://localhost:8765/api/v1/author/JicYPdAAAAAJ
+
+# Check health & cache stats
+curl http://localhost:8765/health
+```
+
+**Python:**
+```python
+import requests
+response = requests.post("http://localhost:8765/api/v1/search/scholar",
+                        json={"q": "quantum computing", "num": 10})
+print(response.headers.get("X-Cache-Status"))  # HIT or MISS
+```
+
+**Full documentation:** [`src/api/README.md`](src/api/README.md) or visit `/docs` when running
+
+---
+
 ## Interactive Demo
 
 Test the API interactively:
@@ -146,9 +216,21 @@ Runs Chrome in headless mode by default (no visible browser window):
 api = GoogleScholar()
 
 # Or explicitly set headless mode
-from google_scholar_api.backends.selenium_backend import SeleniumBackend
+from google_scholar_lib.backends.selenium_backend import SeleniumBackend
 backend = SeleniumBackend(headless=True)
 ```
+
+### Caching (API Only)
+
+The REST API automatically caches responses with configurable TTL:
+- Scholar searches: 24 hours
+- Author profiles: 7 days  
+- Profile searches: 12 hours
+- Citations: 30 days
+
+Cache status is indicated in the `X-Cache-Status` response header.
+
+---
 
 ## Legal
 

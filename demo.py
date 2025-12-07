@@ -4,7 +4,7 @@ Interactive Google Scholar API Demo
 Allows users to choose backend and engine for testing
 """
 
-from google_scholar_api import GoogleScholar
+from google_scholar_lib import GoogleScholar
 import sys
 
 def print_banner():
