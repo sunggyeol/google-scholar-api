@@ -13,7 +13,6 @@ Google Scholar scraping with Python library and REST API with Redis caching.
 - Automatic fallback for rate limiting
 - Redis caching with configurable TTL
 - Interactive API documentation at `/docs`
-- Docker deployment support
 - ARM64 compatible (Jetson, Raspberry Pi)
 
 ## Requirements
@@ -142,14 +141,12 @@ for citation in results.citations:
 # 1. Start Redis (if not already running)
 sudo systemctl start redis-server
 
-# 2. Start API with Docker
-docker compose up -d
+# 2. Start API
+cd src/api
+uvicorn main:app --host 0.0.0.0 --port 8765
 
-# 3. View logs
-docker compose logs -f
-
-# 4. Stop
-docker compose down
+# Or with reload for development
+uvicorn main:app --host 0.0.0.0 --port 8765 --reload
 ```
 
 Access the API at `http://localhost:8765/docs`
@@ -229,6 +226,82 @@ The REST API automatically caches responses with configurable TTL:
 - Citations: 30 days
 
 Cache status is indicated in the `X-Cache-Status` response header.
+
+---
+
+## ☁️ Cloud Deployment (Google Cloud Free Tier)
+
+This project runs on **Google Cloud's Always Free e2-micro** (1GB RAM). A 2GB swap file is required to prevent Chrome crashes.
+
+### Setup (e2-micro, Debian 12)
+
+```bash
+# 1. Create 2GB Swap (Required!)
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+# 2. Install Dependencies
+sudo apt update
+sudo apt install -y git python3-venv python3-pip redis-server chromium chromium-driver
+sudo systemctl enable redis-server && sudo systemctl start redis-server
+
+# 3. Clone & Install
+git clone https://github.com/YOUR_USERNAME/google-scholar-api.git
+cd google-scholar-api
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+
+# 4. Configure
+cp .env.example .env
+nano .env
+```
+
+### Run as Service
+
+Create `/etc/systemd/system/scholar.service`:
+
+```ini
+[Unit]
+Description=Google Scholar API
+After=network.target redis-server.service
+
+[Service]
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/google-scholar-api
+Environment="PATH=/home/YOUR_USERNAME/google-scholar-api/venv/bin"
+ExecStart=/home/YOUR_USERNAME/google-scholar-api/venv/bin/uvicorn src.api.main:app --host 0.0.0.0 --port 8765
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable scholar
+sudo systemctl start scholar
+```
+
+### Public Access (Cloudflare Tunnel)
+
+```bash
+# Install
+curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+sudo dpkg -i cloudflared.deb
+
+# Quick tunnel (temporary URL)
+cloudflared tunnel --url http://localhost:8765
+
+# Or run as service for persistent tunnel
+sudo cloudflared service install
+```
+
+**Note:** Use Standard Persistent Disk (30GB) in `us-central1`, `us-west1`, or `us-east1` to stay within free tier limits.
 
 ---
 
