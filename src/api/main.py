@@ -15,6 +15,8 @@ from google_scholar_lib.models import GoogleScholarResponse
 
 from .config import settings
 from .cache import cache_manager
+from .sheets_logger import init_sheets_logger, get_sheets_logger
+from .middleware import SheetsLoggingMiddleware
 from .models import (
     ScholarSearchRequest,
     ProfileSearchRequest,
@@ -53,6 +55,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add Google Sheets logging middleware
+app.add_middleware(SheetsLoggingMiddleware)
 
 # Initialize Google Scholar client
 scholar = GoogleScholar(backend='selenium')
@@ -138,6 +143,52 @@ async def clear_cache():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to clear cache"
+        )
+
+
+@app.get("/api/v1/sheets/stats", response_model=APIResponse, tags=["Google Sheets"])
+async def get_sheets_stats():
+    """Get Google Sheets logging statistics"""
+    sheets_logger = get_sheets_logger()
+    if not sheets_logger or not sheets_logger.enabled:
+        return APIResponse(
+            success=False,
+            message="Google Sheets logging is not enabled"
+        )
+    
+    logs_count = sheets_logger.get_logs_count()
+    return APIResponse(
+        success=True,
+        message=f"Google Sheets logging is active. Total logs: {logs_count}",
+        data={
+            "enabled": True,
+            "spreadsheet_id": settings.sheets_spreadsheet_id,
+            "sheet_name": settings.sheets_sheet_name,
+            "total_logs": logs_count
+        }
+    )
+
+
+@app.post("/api/v1/sheets/clear", response_model=APIResponse, tags=["Google Sheets"])
+async def clear_sheets_logs():
+    """Clear all logs from Google Sheets"""
+    sheets_logger = get_sheets_logger()
+    if not sheets_logger or not sheets_logger.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google Sheets logging is not enabled"
+        )
+    
+    success = sheets_logger.clear_logs()
+    if success:
+        return APIResponse(
+            success=True,
+            message="Google Sheets logs cleared successfully"
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear Google Sheets logs"
         )
 
 
@@ -360,6 +411,23 @@ async def startup_event():
     logger.info(f"Redis caching: {'enabled' if cache_manager.enabled else 'disabled'}")
     if cache_manager.enabled:
         logger.info(f"Redis: {settings.redis_host}:{settings.redis_port}")
+    
+    # Initialize Google Sheets logging
+    if settings.sheets_logging_enabled and settings.sheets_spreadsheet_id:
+        logger.info("Initializing Google Sheets logging...")
+        init_sheets_logger(
+            spreadsheet_id=settings.sheets_spreadsheet_id,
+            credentials_path=settings.sheets_credentials_path,
+            sheet_name=settings.sheets_sheet_name,
+            enabled=True
+        )
+        sheets_logger = get_sheets_logger()
+        if sheets_logger and sheets_logger.enabled:
+            logger.info(f"Google Sheets logging enabled: Sheet '{settings.sheets_sheet_name}'")
+        else:
+            logger.warning("Google Sheets logging failed to initialize")
+    else:
+        logger.info("Google Sheets logging disabled")
 
 
 @app.on_event("shutdown")

@@ -42,6 +42,24 @@ class Settings(BaseSettings):
     rate_limit_requests: int = 100
     rate_limit_period: int = 60  # seconds
     
+    # Google Sheets Logging Settings
+    sheets_logging_enabled: bool = Field(
+        default=False,
+        description="Enable/disable Google Sheets logging"
+    )
+    sheets_spreadsheet_id: Optional[str] = Field(
+        default=None,
+        description="Google Sheets spreadsheet ID (from URL)"
+    )
+    sheets_credentials_path: str = Field(
+        default="credentials/google-sheets-credentials.json",
+        description="Path to Google Sheets service account credentials JSON"
+    )
+    sheets_sheet_name: str = Field(
+        default="API Logs",
+        description="Name of the sheet tab to log to"
+    )
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
