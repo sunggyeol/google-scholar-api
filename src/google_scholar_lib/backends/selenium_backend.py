@@ -476,9 +476,77 @@ class SeleniumBackend(ScraperBackend):
         articles = []
         try:
             rows = driver.find_elements(By.CSS_SELECTOR, '.gsc_a_tr')
-            for row in rows:
-                title_e = row.find_element(By.CSS_SELECTOR, '.gsc_a_t a')
-                articles.append(OrganicResult(title=title_e.text, link=title_e.get_attribute('href')))
+            for i, row in enumerate(rows):
+                try:
+                    # Extract title and link
+                    title_e = row.find_element(By.CSS_SELECTOR, '.gsc_a_t a')
+                    title = title_e.text
+                    link = title_e.get_attribute('href')
+
+                    # Extract authors from first .gs_gray div
+                    authors_list = []
+                    authors_text = ""
+                    try:
+                        gs_gray_divs = row.find_elements(By.CSS_SELECTOR, '.gsc_a_t .gs_gray')
+                        if len(gs_gray_divs) >= 1:
+                            authors_text = gs_gray_divs[0].text
+                            # Parse author names (they're just text, no links on author profile pages)
+                            if authors_text:
+                                author_names = [name.strip() for name in authors_text.split(',')]
+                                authors_list = [Author(name=name) for name in author_names if name]
+                    except:
+                        pass
+
+                    # Extract publication info from second .gs_gray div
+                    pub_info = ""
+                    try:
+                        gs_gray_divs = row.find_elements(By.CSS_SELECTOR, '.gsc_a_t .gs_gray')
+                        if len(gs_gray_divs) >= 2:
+                            pub_info = gs_gray_divs[1].text
+                    except:
+                        pass
+
+                    # Extract citation count
+                    cited_by_count = 0
+                    inline_links = None
+                    try:
+                        cites_elem = row.find_element(By.CSS_SELECTOR, '.gsc_a_ac')
+                        cites_text = cites_elem.text.strip()
+                        if cites_text:
+                            cited_by_count = int(cites_text)
+
+                            # Try to extract the citation link
+                            try:
+                                cites_link = cites_elem.get_attribute('href')
+                                if cites_link:
+                                    # Extract cites_id from URL
+                                    parsed_url = urllib.parse.urlparse(cites_link)
+                                    parsed_q = urllib.parse.parse_qs(parsed_url.query)
+                                    cites_id = parsed_q.get('cites', [None])[0]
+
+                                    inline_links = InlineLinks(
+                                        cited_by={
+                                            'total': cited_by_count,
+                                            'link': cites_link,
+                                            'cites_id': cites_id
+                                        }
+                                    )
+                            except:
+                                pass
+                    except:
+                        pass
+
+                    articles.append(OrganicResult(
+                        position=i,
+                        title=title,
+                        link=link,
+                        authors=authors_list,
+                        publication_info=pub_info,
+                        cited_by_count=cited_by_count,
+                        inline_links=inline_links
+                    ))
+                except:
+                    continue
         except:
             pass
 
