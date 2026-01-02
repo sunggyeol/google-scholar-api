@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 from ..core import ScraperBackend
 from ..models import (
     GoogleScholarResponse, SearchParameters, SearchMetadata, SearchInformation,
-    OrganicResult, Author, Pagination, AuthorProfile
+    OrganicResult, Author, Pagination, AuthorProfile, InlineLinks, Resource
 )
 from ..utils import random_sleep, random_sleep_long
 
@@ -242,9 +242,119 @@ class SeleniumBackend(ScraperBackend):
                 except:
                     pass
 
+                # Extract citation count and inline links
+                inline_links = None
+                cited_by_count = 0
+                resources_list = []
+                result_id = None
+
+                try:
+                    # Extract result_id (data-cid) for citations
+                    result_id = elem.get_attribute('data-cid')
+                except:
+                    pass
+
+                try:
+                    # Look for footer links section (specifically the .gs_flb variant, not .gs_ggs)
+                    gs_fl = elem.find_element(By.CSS_SELECTOR, '.gs_ri .gs_fl')
+
+                    # Extract citation count
+                    cited_by_dict = None
+                    related_link = None
+                    versions_dict = None
+
+                    for a_tag in gs_fl.find_elements(By.TAG_NAME, 'a'):
+                        try:
+                            a_text = a_tag.text
+                            a_href = a_tag.get_attribute('href')
+
+                            # "Cited by XXX" link
+                            if a_text.startswith('Cited by'):
+                                try:
+                                    count_str = a_text.replace('Cited by', '').strip()
+                                    cited_by_count = int(count_str)
+
+                                    # Extract cites_id from URL
+                                    parsed_url = urllib.parse.urlparse(a_href)
+                                    parsed_q = urllib.parse.parse_qs(parsed_url.query)
+                                    cites_id = parsed_q.get('cites', [None])[0]
+
+                                    cited_by_dict = {
+                                        'total': cited_by_count,
+                                        'link': a_href,
+                                        'cites_id': cites_id
+                                    }
+                                except (ValueError, AttributeError):
+                                    pass
+
+                            # "Related articles" link
+                            elif 'Related articles' in a_text:
+                                related_link = a_href
+
+                            # "All X versions" link
+                            elif 'version' in a_text.lower():
+                                try:
+                                    version_count = int(''.join(filter(str.isdigit, a_text)))
+                                    parsed_url = urllib.parse.urlparse(a_href)
+                                    parsed_q = urllib.parse.parse_qs(parsed_url.query)
+                                    cluster_id = parsed_q.get('cluster', [None])[0]
+
+                                    versions_dict = {
+                                        'total': version_count,
+                                        'link': a_href,
+                                        'cluster_id': cluster_id
+                                    }
+                                except (ValueError, AttributeError):
+                                    pass
+                        except:
+                            pass
+
+                    # Create InlineLinks object if we have any data
+                    if cited_by_dict or related_link or versions_dict:
+                        inline_links = InlineLinks(
+                            cited_by=cited_by_dict,
+                            related_articles_link=related_link,
+                            versions=versions_dict
+                        )
+                except:
+                    pass
+
+                # Extract PDF/HTML resources
+                try:
+                    gs_ggs = elem.find_elements(By.CSS_SELECTOR, '.gs_or_ggsm a')
+                    for res_link in gs_ggs:
+                        try:
+                            res_text = res_link.text
+                            res_href = res_link.get_attribute('href')
+
+                            # Determine format (PDF, HTML, etc.)
+                            format_type = None
+                            if '[PDF]' in res_text or res_href.endswith('.pdf'):
+                                format_type = 'PDF'
+                            elif '[HTML]' in res_text:
+                                format_type = 'HTML'
+
+                            resources_list.append(Resource(
+                                name=res_text.strip('[]'),
+                                format=format_type,
+                                link=res_href
+                            ))
+                        except:
+                            pass
+                except:
+                    pass
+
                 results.append(OrganicResult(
-                    position=i, title=title, link=link, snippet=snippet,
-                    publication_info=pub_info, authors=authors_list
+                    position=i,
+                    title=title,
+                    link=link,
+                    snippet=snippet,
+                    publication_info=pub_info,
+                    authors=authors_list,
+                    inline_links=inline_links,
+                    cited_by_count=cited_by_count,
+                    resources=resources_list,
+                    result_id=result_id
                 ))
             except:
                 continue
