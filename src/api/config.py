@@ -59,7 +59,29 @@ class Settings(BaseSettings):
         default="API Logs",
         description="Name of the sheet tab to log to"
     )
-    
+
+    # Selenium Pool Settings (optimized for 1GB RAM by default)
+    selenium_pool_size: int = Field(
+        default=1,
+        description="Initial number of Selenium drivers in the pool (1 for 1GB RAM)"
+    )
+    selenium_max_pool_size: int = Field(
+        default=2,
+        description="Maximum number of drivers during load spikes (2 for 1GB RAM)"
+    )
+    selenium_max_requests_per_driver: int = Field(
+        default=50,
+        description="Recycle driver after N requests (memory optimization)"
+    )
+    selenium_driver_startup_timeout: int = Field(
+        default=10,
+        description="Driver initialization timeout (seconds)"
+    )
+    selenium_acquire_timeout: int = Field(
+        default=10,
+        description="Max wait time for driver acquisition (seconds) - triggers 503 if exceeded"
+    )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

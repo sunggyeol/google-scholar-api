@@ -108,6 +108,7 @@ class HealthResponse(BaseModel):
     version: str = Field(..., description="API version")
     cache_enabled: bool = Field(..., description="Whether Redis caching is enabled")
     cache_stats: Optional[Dict[str, Any]] = Field(None, description="Cache statistics")
+    pool_metrics: Optional[Dict[str, Any]] = Field(None, description="Selenium pool metrics (driver count, utilization, etc.)")
 
 
 class CacheStatsResponse(BaseModel):

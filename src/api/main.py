@@ -2,16 +2,20 @@
 Google Scholar REST API with Redis Caching
 FastAPI application providing RESTful endpoints for Google Scholar searches
 """
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
+from selenium.common.exceptions import TimeoutException
 import sys
 
 from google_scholar_lib import GoogleScholar
 from google_scholar_lib.models import GoogleScholarResponse
+from google_scholar_lib.backends.pool import SeleniumBackendPool
 
 from .config import settings
 from .cache import cache_manager
@@ -38,13 +42,85 @@ logger.add(
     level="INFO" if not settings.debug else "DEBUG"
 )
 
-# Initialize FastAPI app
+# Global instances (initialized in lifespan)
+backend_pool: Optional[SeleniumBackendPool] = None
+scholar: Optional[GoogleScholar] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI lifespan context manager.
+    Replaces deprecated @app.on_event("startup"/"shutdown").
+    """
+    global backend_pool, scholar
+
+    # ========== STARTUP ==========
+    logger.info(f"Starting {settings.api_title} v{settings.api_version}")
+    logger.info(f"Debug mode: {settings.debug}")
+    logger.info(f"Redis caching: {'enabled' if cache_manager.enabled else 'disabled'}")
+    if cache_manager.enabled:
+        logger.info(f"Redis: {settings.redis_host}:{settings.redis_port}")
+
+    # Initialize Selenium backend pool
+    logger.info("Initializing Selenium backend pool...")
+    backend_pool = SeleniumBackendPool(
+        pool_size=settings.selenium_pool_size,
+        max_pool_size=settings.selenium_max_pool_size,
+        max_requests_per_driver=settings.selenium_max_requests_per_driver,
+        driver_startup_timeout=settings.selenium_driver_startup_timeout,
+        acquire_timeout=settings.selenium_acquire_timeout,
+        health_check_interval=30
+    )
+
+    try:
+        await backend_pool.initialize()
+        logger.info(f"Selenium pool initialized with {settings.selenium_pool_size} driver(s)")
+    except Exception as e:
+        logger.error(f"Failed to initialize Selenium pool: {e}")
+        raise
+
+    # Initialize GoogleScholar client with pool
+    scholar = GoogleScholar(backend='selenium', pool=backend_pool)
+    logger.info("GoogleScholar client initialized with pooled backend")
+
+    # Initialize Google Sheets logging
+    if settings.sheets_logging_enabled and settings.sheets_spreadsheet_id:
+        logger.info("Initializing Google Sheets logging...")
+        init_sheets_logger(
+            spreadsheet_id=settings.sheets_spreadsheet_id,
+            credentials_path=settings.sheets_credentials_path,
+            sheet_name=settings.sheets_sheet_name,
+            enabled=True
+        )
+        sheets_logger = get_sheets_logger()
+        if sheets_logger and sheets_logger.enabled:
+            logger.info(f"Google Sheets logging enabled: Sheet '{settings.sheets_sheet_name}'")
+        else:
+            logger.warning("Google Sheets logging failed to initialize")
+    else:
+        logger.info("Google Sheets logging disabled")
+
+    yield  # <-- Application runs here
+
+    # ========== SHUTDOWN ==========
+    logger.info("Shutting down API server...")
+
+    if backend_pool:
+        await backend_pool.shutdown()
+        logger.info("Selenium pool shutdown complete")
+
+    logger.info("Shutdown complete")
+
+
+# Initialize FastAPI app with lifespan
 app = FastAPI(
     title=settings.api_title,
     version=settings.api_version,
     description=settings.api_description,
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -59,27 +135,24 @@ app.add_middleware(
 # Add Google Sheets logging middleware
 app.add_middleware(SheetsLoggingMiddleware)
 
-# Initialize Google Scholar client
-scholar = GoogleScholar(backend='selenium')
-
 
 # ========== Helper Functions ==========
 
-def get_cached_or_fetch(
+async def get_cached_or_fetch(
     cache_key: str,
     ttl: int,
     fetch_func,
     **kwargs
 ) -> tuple[GoogleScholarResponse, bool]:
     """
-    Get from cache or fetch new data
-    
+    Get from cache or fetch new data (async version for pool support)
+
     Args:
         cache_key: Redis cache key
         ttl: Time-to-live in seconds
-        fetch_func: Function to call if cache miss
+        fetch_func: Async function to call if cache miss
         **kwargs: Arguments to pass to fetch_func
-        
+
     Returns:
         Tuple of (GoogleScholarResponse, cache_hit: bool)
     """
@@ -87,14 +160,14 @@ def get_cached_or_fetch(
     cached_result = cache_manager.get(cache_key)
     if cached_result:
         return cached_result, True
-    
+
     # Cache miss - fetch new data
     logger.info(f"Fetching fresh data for cache key: {cache_key}")
-    result = fetch_func(**kwargs)
-    
+    result = await fetch_func(**kwargs)
+
     # Store in cache
     cache_manager.set(cache_key, result, ttl)
-    
+
     return result, False
 
 
@@ -113,13 +186,16 @@ async def root():
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
-    """Health check endpoint"""
+    """Health check endpoint with pool metrics"""
+    pool_metrics = backend_pool.get_metrics() if backend_pool else {}
+
     return HealthResponse(
         status="healthy",
         timestamp=datetime.utcnow().isoformat(),
         version=settings.api_version,
         cache_enabled=cache_manager.enabled,
-        cache_stats=cache_manager.get_stats()
+        cache_stats=cache_manager.get_stats(),
+        pool_metrics=pool_metrics
     )
 
 
@@ -196,7 +272,7 @@ async def clear_sheets_logs():
 async def search_scholar(request: ScholarSearchRequest, response: Response):
     """
     Search for scholarly publications
-    
+
     - **q**: Search query (required)
     - **num**: Number of results (1-100, default: 10)
     - **start**: Start position for pagination (default: 0)
@@ -211,28 +287,51 @@ async def search_scholar(request: ScholarSearchRequest, response: Response):
             "scholar",
             request.model_dump()
         )
-        
+
         # Get TTL for this engine type
         ttl = cache_manager.get_ttl_for_engine("google_scholar")
-        
+
         # Get cached or fetch new
-        result, cache_hit = get_cached_or_fetch(
-            cache_key=cache_key,
-            ttl=ttl,
-            fetch_func=scholar.search,
-            engine="google_scholar",
-            **request.model_dump()
-        )
-        
+        try:
+            result, cache_hit = await get_cached_or_fetch(
+                cache_key=cache_key,
+                ttl=ttl,
+                fetch_func=scholar.search,
+                engine="google_scholar",
+                **request.model_dump()
+            )
+        except asyncio.TimeoutError:
+            # Pool exhausted - all drivers busy
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "pool_exhausted",
+                    "message": "All Selenium drivers are currently busy. Please retry in a few seconds.",
+                    "retry_after": settings.selenium_acquire_timeout
+                }
+            )
+        except TimeoutException:
+            # Google Scholar page load timeout
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={
+                    "error": "page_load_timeout",
+                    "message": "Google Scholar request timed out. Please try again.",
+                    "timeout": 30
+                }
+            )
+
         # Set cache status header
         response.headers["X-Cache-Status"] = "HIT" if cache_hit else "MISS"
-        
+
         return ScholarSearchResponse(
             success=True,
             cache_hit=cache_hit,
             data=result
         )
-        
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
     except Exception as e:
         logger.error(f"Scholar search error: {e}")
         raise HTTPException(
@@ -245,9 +344,9 @@ async def search_scholar(request: ScholarSearchRequest, response: Response):
 async def get_author(author_id: str, response: Response):
     """
     Get author profile by Google Scholar ID
-    
+
     - **author_id**: Google Scholar author ID (e.g., JicYPdAAAAAJ for Geoffrey Hinton)
-    
+
     Common author IDs:
     - JicYPdAAAAAJ - Geoffrey Hinton
     - WLN3QrAAAAAJ - Yann LeCun
@@ -259,27 +358,61 @@ async def get_author(author_id: str, response: Response):
             "author",
             {"author_id": author_id}
         )
-        
+
         # Get TTL for this engine type
         ttl = cache_manager.get_ttl_for_engine("google_scholar_author")
-        
+
         # Get cached or fetch new
-        result, cache_hit = get_cached_or_fetch(
-            cache_key=cache_key,
-            ttl=ttl,
-            fetch_func=scholar.search_author,
-            author_id=author_id
-        )
-        
+        try:
+            result, cache_hit = await get_cached_or_fetch(
+                cache_key=cache_key,
+                ttl=ttl,
+                fetch_func=scholar.search_author,
+                author_id=author_id
+            )
+        except asyncio.TimeoutError:
+            # Pool exhausted
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "pool_exhausted",
+                    "message": "All Selenium drivers are currently busy. Please retry in a few seconds.",
+                    "retry_after": settings.selenium_acquire_timeout
+                }
+            )
+        except TimeoutException:
+            # Page load timeout
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={
+                    "error": "page_load_timeout",
+                    "message": "Google Scholar request timed out. Please try again.",
+                    "timeout": 30
+                }
+            )
+
+        # Check if author was found (404 if not)
+        if not result.author or result.author.name == "Unknown":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "author_not_found",
+                    "message": f"Author with ID '{author_id}' not found on Google Scholar",
+                    "author_id": author_id
+                }
+            )
+
         # Set cache status header
         response.headers["X-Cache-Status"] = "HIT" if cache_hit else "MISS"
-        
+
         return AuthorResponse(
             success=True,
             cache_hit=cache_hit,
             data=result
         )
-        
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
     except Exception as e:
         logger.error(f"Author fetch error: {e}")
         raise HTTPException(
@@ -305,25 +438,48 @@ async def search_profiles(request: ProfileSearchRequest, response: Response):
         
         # Get TTL for this engine type
         ttl = cache_manager.get_ttl_for_engine("google_scholar_profiles")
-        
+
         # Get cached or fetch new
-        result, cache_hit = get_cached_or_fetch(
-            cache_key=cache_key,
-            ttl=ttl,
-            fetch_func=scholar.search,
-            engine="google_scholar_profiles",
-            **request.model_dump()
-        )
-        
+        try:
+            result, cache_hit = await get_cached_or_fetch(
+                cache_key=cache_key,
+                ttl=ttl,
+                fetch_func=scholar.search,
+                engine="google_scholar_profiles",
+                **request.model_dump()
+            )
+        except asyncio.TimeoutError:
+            # Pool exhausted
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "pool_exhausted",
+                    "message": "All Selenium drivers are currently busy. Please retry in a few seconds.",
+                    "retry_after": settings.selenium_acquire_timeout
+                }
+            )
+        except TimeoutException:
+            # Page load timeout
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={
+                    "error": "page_load_timeout",
+                    "message": "Google Scholar request timed out. Please try again.",
+                    "timeout": 30
+                }
+            )
+
         # Set cache status header
         response.headers["X-Cache-Status"] = "HIT" if cache_hit else "MISS"
-        
+
         return ProfileSearchResponse(
             success=True,
             cache_hit=cache_hit,
             data=result
         )
-        
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
     except Exception as e:
         logger.error(f"Profile search error: {e}")
         raise HTTPException(
@@ -348,24 +504,47 @@ async def get_citation(cite_id: str, response: Response):
         
         # Get TTL for this engine type
         ttl = cache_manager.get_ttl_for_engine("google_scholar_cite")
-        
+
         # Get cached or fetch new
-        result, cache_hit = get_cached_or_fetch(
-            cache_key=cache_key,
-            ttl=ttl,
-            fetch_func=scholar.search_cite,
-            data_cid=cite_id
-        )
-        
+        try:
+            result, cache_hit = await get_cached_or_fetch(
+                cache_key=cache_key,
+                ttl=ttl,
+                fetch_func=scholar.search_cite,
+                data_cid=cite_id
+            )
+        except asyncio.TimeoutError:
+            # Pool exhausted
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "pool_exhausted",
+                    "message": "All Selenium drivers are currently busy. Please retry in a few seconds.",
+                    "retry_after": settings.selenium_acquire_timeout
+                }
+            )
+        except TimeoutException:
+            # Page load timeout
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={
+                    "error": "page_load_timeout",
+                    "message": "Google Scholar request timed out. Please try again.",
+                    "timeout": 30
+                }
+            )
+
         # Set cache status header
         response.headers["X-Cache-Status"] = "HIT" if cache_hit else "MISS"
-        
+
         return CiteResponse(
             success=True,
             cache_hit=cache_hit,
             data=result
         )
-        
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
     except Exception as e:
         logger.error(f"Citation fetch error: {e}")
         raise HTTPException(
@@ -401,39 +580,7 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
 
 
-# ========== Startup/Shutdown Events ==========
-
-@app.on_event("startup")
-async def startup_event():
-    """Run on application startup"""
-    logger.info(f"Starting {settings.api_title} v{settings.api_version}")
-    logger.info(f"Debug mode: {settings.debug}")
-    logger.info(f"Redis caching: {'enabled' if cache_manager.enabled else 'disabled'}")
-    if cache_manager.enabled:
-        logger.info(f"Redis: {settings.redis_host}:{settings.redis_port}")
-    
-    # Initialize Google Sheets logging
-    if settings.sheets_logging_enabled and settings.sheets_spreadsheet_id:
-        logger.info("Initializing Google Sheets logging...")
-        init_sheets_logger(
-            spreadsheet_id=settings.sheets_spreadsheet_id,
-            credentials_path=settings.sheets_credentials_path,
-            sheet_name=settings.sheets_sheet_name,
-            enabled=True
-        )
-        sheets_logger = get_sheets_logger()
-        if sheets_logger and sheets_logger.enabled:
-            logger.info(f"Google Sheets logging enabled: Sheet '{settings.sheets_sheet_name}'")
-        else:
-            logger.warning("Google Sheets logging failed to initialize")
-    else:
-        logger.info("Google Sheets logging disabled")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Run on application shutdown"""
-    logger.info("Shutting down API server")
+# NOTE: Startup/shutdown now handled by lifespan context manager (see above)
 
 
 if __name__ == "__main__":
